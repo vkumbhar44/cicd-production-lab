@@ -16,6 +16,13 @@ def health():
         "status": "healthy"
     })
 
+@app.route("/info")
+def info():
+    return jsonify({
+        "service": "cicd-production-lab",
+        "version": "1.0.0"
+    })
+
 
 @app.route("/version")
 def version():
