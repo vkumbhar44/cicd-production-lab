@@ -8,6 +8,12 @@ on:
         required: true
         type: string
 
+  workflow_run:
+    workflows:
+      - Build Scan and Push to ECR
+    types:
+      - completed
+
 permissions:
   contents: read
   id-token: write
@@ -20,6 +26,9 @@ env:
 jobs:
   validate-ecr-image:
     name: Validate Published ECR Image
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -32,9 +41,25 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Pull published image
+      - name: Determine image tag
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          MANUAL_IMAGE_TAG: ${{ inputs.image_tag }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            IMAGE_TAG="$MANUAL_IMAGE_TAG"
+          else
+            IMAGE_TAG="$SOURCE_SHA"
+          fi
+
+          if [[ ! "$IMAGE_TAG" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "Invalid image tag: expected a 40-character commit SHA"
+            exit 1
+          fi
+
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+      - name: Pull published image
         run: |
           IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
