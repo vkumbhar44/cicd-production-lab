@@ -1,0 +1,90 @@
+name: ECR Image Runtime Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing ECR image tag (Git commit SHA)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-2
+  ECR_REPOSITORY: cicd-production-lab
+  AWS_ACCOUNT_ID: "561598984198"
+
+jobs:
+  validate-ecr-image:
+    name: Validate Published ECR Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::561598984198:role/GitHubActionsECRPushRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull published image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+          docker pull "$IMAGE_URI"
+
+      - name: Run production container
+        run: |
+          docker run -d \
+            --name ecr-runtime-test \
+            -p 5000:5000 \
+            -e APP_ENV=production \
+            -e LOG_LEVEL=WARNING \
+            "$IMAGE_URI"
+
+      - name: Verify application health
+        run: |
+          for i in {1..15}; do
+            if ! docker inspect -f '{{.State.Running}}' ecr-runtime-test 2>/dev/null | grep -q true; then
+              echo "Container exited unexpectedly"
+              docker logs ecr-runtime-test
+              exit 1
+            fi
+
+            if curl -fsS http://localhost:5000/health; then
+              echo "Health check passed"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Health check failed"
+          docker logs ecr-runtime-test
+          exit 1
+
+      - name: Verify application info endpoint
+        run: |
+          response=$(curl -fsS http://localhost:5000/info)
+          echo "$response"
+
+          echo "$response" | jq -e .
+
+      - name: Print container logs
+        if: always()
+        run: |
+          docker logs ecr-runtime-test || true
+
+      - name: Cleanup container
+        if: always()
+        run: |
+          docker rm -f ecr-runtime-test || true
