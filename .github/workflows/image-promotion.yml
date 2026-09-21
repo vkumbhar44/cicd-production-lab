@@ -1,0 +1,90 @@
+name: Promote ECR Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing ECR image SHA tag to promote"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify-image:
+    name: Verify Image in ECR
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_uri: ${{ steps.image.outputs.uri }}
+
+    steps:
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify image exists in ECR
+        id: image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          if [[ -z "$DIGEST" || "$DIGEST" == "None" ]]; then
+            echo "Image not found in ECR"
+            exit 1
+          fi
+
+          IMAGE_URI="${{ vars.ECR_REPOSITORY }}"
+
+          echo "Image verified with digest: $DIGEST"
+          echo "uri=$DIGEST" >> "$GITHUB_OUTPUT"
+
+  development:
+    name: Development Promotion
+    needs: verify-image
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - name: Confirm development promotion
+        run: |
+          echo "Image verified and approved for development stage."
+          echo "Image digest: ${{ needs.verify-image.outputs.image_uri }}"
+
+  staging:
+    name: Staging Promotion
+    needs: development
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Confirm staging promotion
+        run: |
+          echo "Development stage completed."
+          echo "Promoting the same image digest to staging."
+          echo "Image digest: ${{ needs.verify-image.outputs.image_uri }}"
+
+  production:
+    name: Production Promotion
+    needs: staging
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Confirm production promotion
+        run: |
+          echo "Staging stage completed."
+          echo "Promoting the same image digest to production."
+          echo "Image digest: ${{ needs.verify-image.outputs.image_uri }}"
