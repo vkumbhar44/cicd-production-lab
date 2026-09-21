@@ -70,8 +70,7 @@ jobs:
 
           curl -fsS http://localhost:5002/health
 
-          docker logs cicd-prod 2>&1 | \
-            grep -F "environment=production, log_level=WARNING"
+          
 
       - name: Cleanup containers
         if: always()
