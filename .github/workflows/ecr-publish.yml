@@ -13,41 +13,25 @@ permissions:
 
 jobs:
   publish:
-    name: Build, Scan and Push
+    name: Build, Test, Scan and Push
     runs-on: ubuntu-latest
 
     steps:
+      # -----------------------------------------
+      # 1. Checkout repository
+      # -----------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v6
 
-
-
-
-      - name: Diagnose GitHub OIDC claims
-        shell: bash
-        run: |
-          TOKEN=$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
-            | jq -r '.value')
-
-          PAYLOAD=$(echo "$TOKEN" | cut -d '.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null)
-
-          echo "$PAYLOAD" | jq '{sub, aud, repository, ref}'
-
-      - name: Configure AWS credentials using OIDC
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
+      # -----------------------------------------
+      # 2. Set up Docker Buildx
+      # -----------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # -----------------------------------------
+      # 3. Build Docker image ONCE
+      # -----------------------------------------
       - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
@@ -57,6 +41,84 @@ jobs:
           load: true
           tags: cicd-production-lab:scan
 
+      # -----------------------------------------
+      # 4. Run development container
+      # -----------------------------------------
+      - name: Run development container
+        run: |
+          docker run -d \
+            --name cicd-dev \
+            -p 5001:5000 \
+            -e APP_ENV=development \
+            -e LOG_LEVEL=DEBUG \
+            cicd-production-lab:scan
+
+      # -----------------------------------------
+      # 5. Run production container
+      # -----------------------------------------
+      - name: Run production container
+        run: |
+          docker run -d \
+            --name cicd-prod \
+            -p 5002:5000 \
+            -e APP_ENV=production \
+            -e LOG_LEVEL=WARNING \
+            cicd-production-lab:scan
+
+      # -----------------------------------------
+      # 6. Verify development configuration
+      # -----------------------------------------
+      - name: Verify development container
+        shell: bash
+        run: |
+          set -e
+
+          test "$(docker exec cicd-dev printenv APP_ENV)" = "development"
+          test "$(docker exec cicd-dev printenv LOG_LEVEL)" = "DEBUG"
+
+          for i in {1..15}; do
+            if curl -fsS http://localhost:5001/health; then
+              break
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://localhost:5001/health
+
+          docker logs cicd-dev 2>&1 | \
+            grep -F "environment=development, log_level=DEBUG"
+
+      # -----------------------------------------
+      # 7. Verify production configuration
+      # -----------------------------------------
+      - name: Verify production container
+        shell: bash
+        run: |
+          set -e
+
+          test "$(docker exec cicd-prod printenv APP_ENV)" = "production"
+          test "$(docker exec cicd-prod printenv LOG_LEVEL)" = "WARNING"
+
+          for i in {1..15}; do
+            if curl -fsS http://localhost:5002/health; then
+              break
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://localhost:5002/health
+
+      # -----------------------------------------
+      # 8. Cleanup test containers
+      # -----------------------------------------
+      - name: Cleanup test containers
+        if: always()
+        run: |
+          docker rm -f cicd-dev cicd-prod || true
+
+      # -----------------------------------------
+      # 9. Scan image with Trivy
+      # -----------------------------------------
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -68,6 +130,25 @@ jobs:
           vuln-type: os,library
           severity: HIGH,CRITICAL
 
+      # -----------------------------------------
+      # 10. Configure AWS credentials using OIDC
+      # -----------------------------------------
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # -----------------------------------------
+      # 11. Login to Amazon ECR
+      # -----------------------------------------
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # -----------------------------------------
+      # 12. Tag image for ECR
+      # -----------------------------------------
       - name: Tag image for ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -77,6 +158,9 @@ jobs:
           docker tag cicd-production-lab:scan \
             $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
+      # -----------------------------------------
+      # 13. Push image to ECR
+      # -----------------------------------------
       - name: Push image to ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
