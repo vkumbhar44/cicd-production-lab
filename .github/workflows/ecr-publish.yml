@@ -154,17 +154,49 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           docker tag cicd-production-lab:scan \
-            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
       # -----------------------------------------
-      # 13. Push image to ECR
+      # 13. Push image to ECR (idempotent)
       # -----------------------------------------
       - name: Push image to ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
+        shell: bash
         run: |
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          set -euo pipefail
+
+          echo "Checking ECR for image tag: ${IMAGE_TAG}"
+
+          if aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=${IMAGE_TAG}" \
+            >/dev/null 2>ecr-error.txt; then
+
+            echo "Image tag already exists in ECR."
+            echo "Skipping push to preserve tag immutability."
+            echo "Image: ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          else
+            if grep -q "ImageNotFoundException" ecr-error.txt; then
+
+              echo "Image tag not found. Pushing image..."
+
+              docker push \
+                "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+            else
+
+              echo "ERROR: Failed to check ECR image tag."
+              cat ecr-error.txt
+              exit 1
+
+            fi
+          fi
